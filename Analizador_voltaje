@@ -1,1 +1,88 @@
+import serial
+import time
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import StringIO
+from datetime import datetime
 
+PUERTO = 'COM4' 
+BAUDIOS = 115200
+
+def ejecutar_sistema_blindado():
+    try:
+        print(f"Conectando a {PUERTO}...")
+        # Timeout corto para que no se congele la pantalla
+        arduino = serial.Serial(PUERTO, BAUDIOS, timeout=2) 
+        time.sleep(2)
+        
+        # Limpiar cualquier basura del puerto y forzar reinicio de flujo
+        arduino.reset_input_buffer()
+        print("Solicitando datos (Enviando 'L')...")
+        arduino.write(b'L')
+        
+        lineas = []
+        # Tiempo límite de seguridad para toda la descarga
+        inicio_descarga = time.time()
+        
+        while True:
+            linea = arduino.readline().decode('utf-8', errors='ignore').strip()
+            
+            if linea:
+                if "--- FIN DE DESCARGA ---" in linea: 
+                    print("\n✅ Final de archivo alcanzado.")
+                    break
+                if "/" in linea:
+                    lineas.append(linea)
+                    print(f"\rRegistros recuperados: {len(lineas)}", end="")
+            else:
+                # Si pasa mucho tiempo sin recibir nada, salir
+                if len(lineas) > 0:
+                    print("\n⚠️ Descarga finalizada por inactividad.")
+                    break
+                elif time.time() - inicio_descarga > 10:
+                    print("\n❌ El Arduino no responde. Revisa el Monitor Serie o presiona RESET.")
+                    break
+        
+        arduino.close()
+
+        if not lineas: return
+
+        # --- TODO EL PROCESO DE TABLA Y GRÁFICA ORIGINAL (SIN CAMBIOS) ---
+        columnas = ['Fecha', 'Hora', 'V_Max', 'V_Min', 'V_RMS_Prom', 'Picos', 'Caidas']
+        df = pd.read_csv(StringIO("\n".join(lineas)), names=columnas, header=None)
+        df_limpio = df[df['V_RMS_Prom'] > 50].copy()
+        df_limpio['Tiempo'] = pd.to_datetime(df_limpio['Fecha'] + ' ' + df_limpio['Hora'], dayfirst=True)
+
+        print("\n" + "="*85)
+        print(df_limpio.tail(20).to_string(index=False))
+        print("="*85)
+
+        # Respaldo solo si se desea
+        if input("\n¿Guardar respaldo CSV? (s/n): ").lower() == 's':
+            df.to_csv(f"respaldo_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", index=False)
+            print("Guardado.")
+
+        if input("¿Borrar SD? (s/n): ").lower() == 's':
+            with serial.Serial(PUERTO, BAUDIOS, timeout=2) as ser:
+                time.sleep(2); ser.write(b'B'); print("SD Limpia.")
+
+        # GRÁFICA ORIGINAL INTACTA
+        plt.style.use('seaborn-v0_8-darkgrid')
+        plt.figure(figsize=(12, 6))
+        plt.fill_between(df_limpio['Tiempo'], df_limpio['V_Min'], df_limpio['V_Max'], color='#3498db', alpha=0.3, label='Oscilación')
+        plt.plot(df_limpio['Tiempo'], df_limpio['V_RMS_Prom'], color='#2980b9', linewidth=2, marker='o', markersize=4, label='Voltaje Promedio RMS')
+        picos = df_limpio[df_limpio['Picos'] > 0]
+        if not picos.empty:
+            plt.scatter(picos['Tiempo'], picos['V_Max'], color='red', marker='*', s=150, label='ALERTA: Pico', zorder=5)
+        plt.axhline(y=128, color='#e74c3c', linestyle='--')
+        plt.axhline(y=110, color='#f39c12', linestyle='--')
+        plt.title(f"Reporte de Calidad Eléctrica")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.show()
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    ejecutar_sistema_blindado()
